@@ -1,0 +1,39 @@
+# --- Private financial data: never commit ---
+# Raw George exports and cleaned Parquet
+data/
+
+# Real config files hold account and card numbers; only the *.example.csv files are shared
+config/*.csv
+!config/*.example.csv
+
+# Safety net: stray exports or outputs anywhere else in the repo
+*.csv
+!config/*.example.csv
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# Notebooks keep outputs (real rows) inside the file
+*.ipynb
+.ipynb_checkpoints/
+
+# Secrets (future API adapter)
+.env
+.env.*
+
+# --- Python / tooling ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- dbt (later) ---
+target/
+dbt_packages/
+logs/
+
+# --- IDE ---
+.idea/
