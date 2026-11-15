@@ -1,15 +1,51 @@
 models:
   - name: stg_erste_hu__transactions
+    config:
+      contract:
+        enforced: true
     columns:
       - name: txn_key
+        data_type: varchar
         data_tests:
           - not_null
           - unique
       - name: account_alias
+        data_type: varchar
         data_tests:
           - not_null
+      - name: card_alias
+        data_type: varchar
+      - name: booking_date
+        data_type: date
+      - name: transaction_ts
+        data_type: timestamp
+      - name: spend_date
+        data_type: date
+      - name: amount
+        data_type: decimal(18, 2)
       - name: currency
+        data_type: varchar
         data_tests:
           - accepted_values:
               arguments:
                 values: ['EUR', 'HUF']
+      - name: partner_name
+        data_type: varchar
+      - name: partner_iban
+        data_type: varchar
+      - name: transaction_id
+        data_type: varchar
+      - name: is_internal_transfer
+        data_type: boolean
+      - name: is_fx_payment
+        data_type: boolean
+      - name: fx_orig_amount
+        data_type: decimal(18, 2)
+      - name: fx_orig_currency
+        data_type: varchar
+      - name: fx_rate
+        data_type: double
+      - name: fx_amount_ok
+        data_type: boolean
+      - name: source_file
+        data_type: varchar
