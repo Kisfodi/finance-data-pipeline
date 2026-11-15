@@ -1,0 +1,7 @@
+sources:
+  - name: erste_hu
+    meta:
+      external_location: "./data/clean/erste_hu/*.parquet"
+
+    tables:
+      - name: transactions
