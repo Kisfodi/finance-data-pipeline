@@ -1,0 +1,6 @@
+finance_data_pipeline:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: './data/warehouse/finance.duckdb'

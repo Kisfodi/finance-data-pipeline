@@ -1,0 +1,4 @@
+data_tests:
+  - name: assert_card_alias_not_unknown
+    config:
+      severity: warn

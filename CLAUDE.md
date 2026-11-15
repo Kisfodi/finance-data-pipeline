@@ -23,8 +23,11 @@ Also done:
 - Git repository with `.gitignore` (no remote yet; I commit by hand).
 - Dependencies declared in `pyproject.toml` with dependency groups.
 - Automated tests: pytest suite in `tests/`, fabricated data only, covering transform, extract, guards, coverage, config loaders and an end-to-end pipeline run.
+- DuckDB + dbt (roadmap step 1): source `erste_hu.transactions` over all cleaned Parquet files, staging model `stg_erste_hu__transactions` (de-duplicated on `txn_key`, keeping the copy from the shortest export; `amount` and `fx_orig_amount` as `DECIMAL(18,2)`, `booking_date` and `spend_date` as `DATE`), materialized as a table in `data/warehouse/finance.duckdb`, with an enforced contract on all 18 columns. dbt tests: `txn_key` unique and not null, `account_alias` not null, currency in (EUR, HUF), singular test for `unknown_card` (warn). `dbt build` passes; row count after de-duplication equals the number of distinct `txn_key`s in the source; stored column types match the contract.
 
-Not done yet: DuckDB + dbt, categories, marts, FX-markup analysis, dashboard, orchestration, CI.
+In progress: finishing roadmap step 1 (see open step 1: warn check and learning note).
+
+Not done yet: categories, marts, FX-markup analysis, dashboard, orchestration, CI.
 
 Not exercised on real data yet: `is_internal_transfer` (no own-account transfers in the exports so far; covered only by tests).
 
@@ -33,15 +36,28 @@ Not exercised on real data yet: `is_internal_transfer` (no own-account transfers
 ```
 finance_pipeline/
   CLAUDE.md
+  LEARNING.md                   # my learning log, one section per roadmap step (written by me)
   .gitignore                    # data/, real config CSVs, any *.csv / *.parquet / *.duckdb / *.ipynb, .env, .venv/, caches, .idea/
   pyproject.toml                # dependencies, dependency groups, pytest settings
   uv.lock                       # exact tested versions
+  dbt_project.yml               # dbt project: profile name, test-paths, staging materialized as table
+  profiles.yml                  # dbt connection: DuckDB file path only, no secrets (committed)
+  models/
+    staging/erste_hu/
+      _erste_hu__sources.yml    # source erste_hu.transactions -> external_location data/clean/erste_hu/*.parquet
+      stg_erste_hu__transactions.sql   # CTEs: source -> with_file_span -> deduplicated -> typed
+      stg_erste_hu__transactions.yml   # enforced contract (all columns with data_type) and column tests
+  dbt_tests/                    # dbt singular tests (not tests/, which is pytest)
+    assert_card_alias_not_unknown.sql
+    schema.yml                  # severity: warn for the singular test
+  target/, logs/                # dbt output, gitignored
   config/
     accounts.example.csv        # account_number (8-8-8 with hyphens), alias   -> real file: accounts.csv (gitignored)
     cards.example.csv           # card_ref (first6-last4), alias               -> real file: cards.csv (gitignored)
   data/                         # gitignored entirely
     raw/erste_hu/               # exports exactly as George produced them, never edited
     clean/erste_hu/             # <alias>_<start>_<end>.parquet, one per raw file
+    warehouse/finance.duckdb    # dbt output; rebuildable from clean/, no backup needed
   pipelines/
     common/                     # source-independent pieces
       accounts.py               # load_accounts, lookup_alias
@@ -80,8 +96,12 @@ uv run python -m pipelines.erste_hu "data/raw/erste_hu/*.csv" --accounts config/
 
 - Strict mode (warnings become errors, useful for CI): add `-W error::UserWarning` after `python`.
 - Tests: `uv run pytest` (settings in `pyproject.toml`: tests in `tests/`, project root on the import path, any unexpected warning fails a test).
-- Dependencies live in `pyproject.toml` as minimum versions; `uv.lock` holds the exact tested versions (Python 3.14.7, pandas 3.1.1, pyarrow 26.0.1). Upgrade on purpose with `uv lock --upgrade-package <name>`, then re-check the regression baseline.
-  - Main (pipeline): `pandas`, `pyarrow`.
+- dbt, also from the project root (relative paths in `profiles.yml` and the source location resolve from where dbt runs):
+  - `uv run dbt debug`: check profile and connection.
+  - `uv run dbt build`: build models and run dbt tests.
+  - `uv run dbt show --select <model>` or `--inline "<sql with {{ ref(...) }}>"`; add `--output json` for untruncated values. Prefer aggregates when sharing output.
+- Dependencies live in `pyproject.toml` as minimum versions; `uv.lock` holds the exact tested versions (Python 3.14.7, pandas 3.1.1, pyarrow 26.0.1, duckdb 2.0.0, dbt-core 1.12.7, dbt-duckdb 1.11.1). Upgrade on purpose with `uv lock --upgrade-package <name>`, then re-check the regression baseline.
+  - Main: `pandas`, `pyarrow` (pipeline), `duckdb`, `dbt-duckdb` (warehouse). dbt-core 2.0 exists only as a release candidate; stay on 1.x until 2.0 and a matching `dbt-duckdb` are stable.
   - Group `dev` (installed by default): `pytest`.
   - Group `analysis` (notebooks and plots, not used by the pipeline): `numpy`, `matplotlib`, `seaborn`, `ipykernel`. Install with `uv sync --group analysis`; a plain `uv sync` removes them again.
 - The environment is Windows with uv and PyCharm.
@@ -114,7 +134,7 @@ FX
 
 Keys and dates
 - `txn_key` = sha256 of account number, booking date, amount, currency, partner, transaction time + an occurrence counter, first 16 hex characters. The bank gives no unique id for card payments, and identical purchases on one day are legitimate, so no blind de-duplication. Built from the real account number so it survives alias renames.
-- Overlapping exports (for example yearly + quarterly) give identical keys, so de-duplicate on `txn_key` downstream in dbt.
+- Overlapping exports (for example yearly + quarterly) give identical keys, so de-duplicate on `txn_key` downstream in dbt (done in staging; see the dbt section).
 - Dates: `booking_date`, `transaction_ts` (Europe/Budapest local, naive, empty for non-card rows), `spend_date` = transaction date, falling back to booking date. Exports are cut by booking date, so a purchase can fall before the range start. Month totals by `spend_date` are final only after the next month's file is loaded: incremental models must reprocess the previous month.
 - Internal transfers: `is_internal_transfer` is true when the partner IBAN minus its first 4 characters equals one of my own account numbers (hyphens removed). Own-account transfers must not count as spending.
 
@@ -134,6 +154,18 @@ Structure and checks
 - Wildcards are expanded in Python (`expand_globs`) because cmd.exe and PowerShell pass `*.csv` through unexpanded.
 - Re-running overwrites the same output file names, so every step is idempotent.
 
+dbt and DuckDB
+- One DuckDB database for everything (`data/warehouse/finance.duckdb`), not one per provider: marts need all accounts and providers together, and a dbt target points at one database. Provider folders exist only in `data/raw/` and `data/clean/`.
+- Source design: one dbt source per provider, one logical table backed by a wildcard over all its Parquet files. Date-range files are storage, not structure: no per-file or per-account sources. Account and currency are columns. Filter periods by `spend_date` / `booking_date` in models, never by picking files.
+- Naming: `stg_<source>__<entity>`; the provider stays in the model name even inside a provider folder, because model names must be unique and `ref()` and database objects show no folder. Sources in `_<source>__sources.yml`, separate from model YAML.
+- Staging is materialized as a table, not a view: a view stores the relative Parquet path and fails when queried from any other folder (PyCharm viewer, notebooks, a dashboard or Docker). The table makes the database self-contained; it is current only after `dbt build`.
+- De-duplication: the most specific export is the authoritative copy. `with_file_span` adds `file_span_days` = end date minus start date, read from the last two `_`-separated parts of `source_file` (`SPLIT_PART` with negative indexes, so aliases may contain any number of underscores; a bad name gives `''` and the `DATE` cast fails loudly). `deduplicated` keeps `QUALIFY ROW_NUMBER() OVER (PARTITION BY txn_key ORDER BY file_span_days, source_file) = 1`: shortest span first, `source_file` as the unique tie-breaker so the result is deterministic. `typed` drops the helper with `* EXCLUDE (file_span_days)`. Only `source_file` differs between copies, so totals are unaffected; compared with the first version (file-name order), only the January duplicates changed (now monthly instead of yearly). Date format of file names is owned by Python (`parse_filename`), so SQL does not re-validate it.
+- Types are converted in dbt only (one owner), in the `typed` CTE: `amount` and `fx_orig_amount` float -> `DECIMAL(18,2)` (money: exact cents for sums and reconciliation; all current values have at most 2 decimals, a 3-decimal currency would need `(18,3)`), `booking_date` / `spend_date` from midnight timestamps to `DATE` (clean grouping and date joins, for example FX reference rates). `fx_rate` stays `DOUBLE`: a ratio that is multiplied and compared, never summed, so float precision is more than enough. `transaction_ts` stays a timestamp without time zone (Budapest local). Non-FX rows hold real `NULL`s (not `NaN`), which cast cleanly.
+- Enforced model contract on `stg_erste_hu__transactions`: every output column listed with `data_type`, in `OUTPUT_COLS` order. It is the dbt-side check of the Python -> dbt contract: an extra or missing column, or a wrong type (for example a forgotten cast, or a helper column left in the final `select`), stops the build. Write precision and scale (`decimal(18,2)`): plain `numeric` / `decimal` means `DECIMAL(18,3)` in DuckDB, and with a contract the stored table takes the contract's type. With the contract in place, `SELECT * REPLACE / EXCLUDE` is kept: the SQL stays short and the YAML holds the explicit, checked column list. Changing `OUTPUT_COLS` means updating this contract.
+- A failed `dbt build` leaves the previous table in place, so `describe` / queries on `ref()` can show stale results. Check that the last build succeeded; `dbt show --select <model>` runs the current SQL without building.
+- dbt tests live in `dbt_tests/` (`test-paths`), so they do not mix with pytest in `tests/`. A singular test's severity is set in a top-level `data_tests:` YAML entry (or `config()` in its SQL), never under a model column, which takes only generic tests.
+- `profiles.yml` holds only the DuckDB file path, so it is committed. A future cloud target (for example Databricks) must read credentials with `env_var()`, never commit them.
+
 ## Conventions
 
 - Python 3.14+ syntax with type hints on function signatures (`str | Path`, `list[str]`). Single quotes. snake_case. Small functions.
@@ -147,13 +179,50 @@ Structure and checks
 - After every change, tell me which files changed and what changed in each, and say what was tested and what was not. I often apply changes to my own copy file by file.
 - Keep explanations short and direct; say when something was verified versus assumed.
 
+## How I work with Claude (learning first)
+
+This project is how I learn data engineering. Working code I cannot explain is a failure, not a shortcut. Default to helping me think, not doing the work for me.
+
+Modes. I may name one; if I do not, use the default for the roadmap step (table below).
+- **Review** (default for anything I write): point out bugs, edge cases, privacy risks and weak spots, ranked by importance, with line references. Say *what* is wrong and *why*; do not rewrite my code. Show a fix only when I ask, and then the smallest one.
+- **Hint**: when I am stuck, give the smallest useful nudge first (the concept, the docs page, the question to ask myself). Give a bigger hint only if I ask again. Never jump straight to the solution.
+- **Explain**: teach the concept with a tiny example that is not my project's code, then let me apply it.
+- **Quiz**: after a step, ask me 3-5 short questions about why it works (for example: why de-duplicate on `txn_key` in dbt and not in Python?). Correct my answers honestly.
+- **Build**: you write the code. Only for steps marked delegate, or when I explicitly say "build it". Afterwards, tell me the 2-3 things in it most worth understanding.
+
+Defaults per roadmap step:
+
+| Step | Default mode | Why |
+|---|---|---|
+| dbt staging model, dbt tests | Hint + Review | core data-engineering skill: SQL, typing, de-duplication |
+| Category seed and rules | Review | my own business logic |
+| Marts, incremental models | Hint + Review | data modeling and windowing are the main learning goal |
+| FX-markup analysis | Explain + Review | my actual data-science question; I do the analysis |
+| DuckDB setup, dashboard | Review | some new tools, less core |
+| Dockerfile, docker compose | Hint + Review | job-relevant; I write it, you check privacy (`.dockerignore`) |
+| CI workflow, backup script, `.gitignore`, renames, boilerplate | Build | little learning value |
+| Tests | I write the test cases first (what correct means); code can be either | deciding behaviour is the hard part |
+
+Rules for every mode:
+- Before helping with something I am stuck on, ask what I tried and what I expected, unless I already said.
+- If I ask for code in a learning step, check once ("this is a Hint step: want a hint or the full code?"), then respect my answer.
+- Point out when I seem to accept something without understanding it, and suggest a quiz or an explain-back.
+- When you review, also say what is good, so I know what to keep doing.
+- The privacy rules and conventions above apply in every mode.
+
+After each roadmap step I write a few lines in my own words in `LEARNING.md` (one section per step: built, learned, would do differently). Before moving to the next step, check that the step's section is filled in, and ask me if it is not. These notes are mine; do not write them for me. They follow the same privacy rule: no real amounts, partners, row counts, account or card numbers.
+
 ## Open next steps
 
 In rough order:
 
-1. DuckDB + dbt staging model `stg_transactions`: read `data/clean/erste_hu/*.parquet`, cast `amount` to `DECIMAL(18,2)` and dates to `date`, de-duplicate on `txn_key`. dbt tests: unique and not null `txn_key`, accepted currencies, `account_alias` exists, and `card_alias != 'unknown_card'` with `severity: warn`. A category seed CSV would be caught by the `*.csv` rule in `.gitignore`: add an exception only after deciding merchant names are fine to share.
-2. Category seed (merchant rule -> category) joined in dbt; unmatched merchants fall into "uncategorized" for occasional review.
-3. Marts: monthly spend by category and currency (by `spend_date`), income vs spending without internal transfers, recurring payments. Incremental, reprocessing the previous month.
+1. Finish roadmap step 1 (staging model done: span-based de-duplication and enforced contract):
+   - Check that the `unknown_card` test really warns (temporarily point it at an existing alias; expect `WARN` and a successful build).
+   - Optional: one-line `description`s for the less obvious columns (`txn_key`, `spend_date`, `fx_amount_ok`, `source_file`) for `dbt docs`.
+   - Learning note for the step in `LEARNING.md`.
+   - Considered and not chosen for de-duplication: drop `source_file` and use `distinct` (disagreeing copies would fail `unique` loudly, but traceability is lost).
+2. Category seed (merchant rule -> category) joined in dbt; unmatched merchants fall into "uncategorized" for occasional review. A seed CSV is caught by the `*.csv` rule in `.gitignore`: add an exception only after deciding merchant names are fine to share. The `unknown_card` check and an "uncategorized" check have the same shape: a good point to turn the singular test into a custom generic test.
+3. Marts: monthly spend by category and currency (by `spend_date`), income vs spending without internal transfers, recurring payments. Incremental, reprocessing the previous month. Model as a star schema: transactions as the fact table; dimensions only where an entity has its own attributes (accounts: currency, provider, type; cards; categories; calendar). An account dimension needs an alias-keyed seed without account numbers, never `config/accounts.csv`. Consider separate schemas for staging and marts (`+schema`; mind the default prefix from `generate_schema_name`).
 4. FX analysis: add daily ECB or MNB reference rates as a second small source, compute the markup on foreign card payments, compare with the rate from my own HUF -> EUR top-ups (needs real internal transfers in the data; this also exercises `is_internal_transfer`).
 5. Dashboard (Streamlit or Metabase) on the DuckDB marts.
 6. One command that runs clean, `dbt build` and the coverage check; later an orchestrator (Dagster) for scheduling or a trigger on new files.

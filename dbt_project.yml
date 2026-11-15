@@ -1,0 +1,8 @@
+name: finance_data_pipeline
+version: null
+profile: finance_data_pipeline
+test-paths: ["dbt_tests"]
+models:
+  finance_data_pipeline:
+    staging:
+      +materialized: table
